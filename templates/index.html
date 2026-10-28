@@ -108,6 +108,9 @@
 
 <script>
 const BUILT_IN_FILTER = {{ filter | tojson }};
+const HASHTAG = {{ wedding.hashtag | tojson }};
+// Make sure the retro stamp font is ready before the first photo is taken
+if (document.fonts && document.fonts.load) { document.fonts.load("700 24px 'Space Mono'").catch(() => {}); }
 const stage = document.getElementById('stage');
 const cameraShell = document.getElementById('cameraShell');
 const viewfinder = document.getElementById('viewfinder');
@@ -132,7 +135,7 @@ let busy = false; // true while capturing/uploading, to ignore extra taps
 
 async function requestStream() {
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode }, audio: false });
+    mediaStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
   } catch (err) {
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
@@ -172,7 +175,7 @@ async function openCamera() {
     viewfinder.classList.add('zoom-in');
     viewfinder.classList.toggle('mirror', facingMode === 'user');
     const stream = await streamPromise;
-    if (stream) video.srcObject = stream;
+    if (stream) { video.srcObject = stream; video.style.filter = BUILT_IN_FILTER.css; enableTorch(stream); }
   }, 260);
 }
 
@@ -182,7 +185,7 @@ flipBtn.addEventListener('click', async (e) => {
   viewfinder.classList.toggle('mirror', facingMode === 'user');
   stopStream();
   const stream = await requestStream();
-  if (stream) video.srcObject = stream;
+  if (stream) { video.srcObject = stream; video.style.filter = BUILT_IN_FILTER.css; enableTorch(stream); }
 });
 
 viewfinder.addEventListener('click', (e) => {
@@ -190,20 +193,165 @@ viewfinder.addEventListener('click', (e) => {
   snapPhoto();
 });
 
-// --- Capture: burn in the fixed filter + a timestamp, then auto-upload ---
+// --- Flash: always ON where the browser allows it ---
+// Android (Chrome, rear camera): the real torch is switched on.
+// Front camera (iPhone + Android): the screen turns bright white for a moment.
+// iPhone rear camera: Safari does not let websites use the torch, so no flash there.
+let torchOn = false;
+async function enableTorch(stream) {
+  torchOn = false;
+  try {
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.torch) {
+      await track.applyConstraints({ advanced: [{ torch: true }] });
+      torchOn = true;
+    }
+  } catch (e) { /* torch not supported on this phone/browser */ }
+}
 
-function snapPhoto() {
+function showScreenFlash() {
+  return new Promise(resolve => {
+    const el = document.createElement('div');
+    el.style.cssText = 'position:fixed;inset:0;background:#fff;z-index:9999;';
+    document.body.appendChild(el);
+    setTimeout(() => resolve(el), 450); // give the camera a moment to adjust to the light
+  });
+}
+
+// --- Retro look: "Dramatic Warm" + the adjustments you chose ---
+const LOOK = { exposure: -22, highlights: -100, contrast: -47, brightness: -28, saturation: 43, sharpness: 36 };
+const WARM = [1.10, 1.01, 0.86]; // red, green, blue multipliers (warm tint)
+
+function buildToneLUT() {
+  const gamma = 1 + (-LOOK.brightness / 100) * 0.25;
+  const cf = 1 + (LOOK.contrast / 100) * 0.5;
+  const lut = new Uint8ClampedArray(256);
+  for (let i = 0; i < 256; i++) {
+    let v = Math.pow(i / 255, gamma);        // brightness
+    v = (v - 0.5) * cf + 0.5;                // contrast
+    v = v * 0.96 + 0.03;                     // faded, lifted blacks (retro)
+    lut[i] = v * 255;
+  }
+  return lut;
+}
+
+function sharpen(d, w, h, amount) {
+  const src = new Uint8ClampedArray(d);
+  const tmp = new Uint16Array(w * h * 3);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const xm = x > 0 ? x - 1 : x, xp = x < w - 1 ? x + 1 : x;
+      for (let c = 0; c < 3; c++) {
+        tmp[(y * w + x) * 3 + c] = src[(y * w + xm) * 4 + c] + src[(y * w + x) * 4 + c] + src[(y * w + xp) * 4 + c];
+      }
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const ym = y > 0 ? y - 1 : y, yp = y < h - 1 ? y + 1 : y;
+    for (let x = 0; x < w; x++) {
+      for (let c = 0; c < 3; c++) {
+        const blur = (tmp[(ym * w + x) * 3 + c] + tmp[(y * w + x) * 3 + c] + tmp[(yp * w + x) * 3 + c]) / 9;
+        const o = (y * w + x) * 4 + c;
+        d[o] = src[o] + amount * (src[o] - blur);
+      }
+    }
+  }
+}
+
+function applyRetroLook(w, h) {
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  sharpen(d, w, h, (LOOK.sharpness / 100) * 1.5);
+
+  const gain = Math.pow(2, (LOOK.exposure / 100) * 1.0);
+  const hl = -LOOK.highlights / 100;
+  const sat = 1 + LOOK.saturation / 100;
+  const lut = buildToneLUT();
+  const cx = w / 2, cy = h / 2;
+
+  for (let y = 0; y < h; y++) {
+    const dy = (y - cy) / cy;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      let r = d[i] * gain, g = d[i + 1] * gain, b = d[i + 2] * gain;           // exposure
+
+      const L = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;                   // highlights
+      const t = Math.min(1, Math.max(0, (L - 0.4) / 0.6));
+      const f = 1 - 0.30 * hl * (t * t * (3 - 2 * t));
+      r = lut[Math.min(255, (r * f) | 0)];                                      // brightness + contrast + fade
+      g = lut[Math.min(255, (g * f) | 0)];
+      b = lut[Math.min(255, (b * f) | 0)];
+
+      const Ls = 0.2126 * r + 0.7152 * g + 0.0722 * b;                          // saturation
+      r = Ls + (r - Ls) * sat;
+      g = Ls + (g - Ls) * sat;
+      b = Ls + (b - Ls) * sat;
+
+      const dx = (x - cx) / cx;                                                 // soft vignette
+      const vig = 1 - 0.28 * Math.min(1, (dx * dx + dy * dy) / 2);
+      const grain = (Math.random() - 0.5) * 16;                                 // film grain
+
+      d[i]     = r * WARM[0] * vig + grain;                                     // warm tint
+      d[i + 1] = g * WARM[1] * vig + grain;
+      d[i + 2] = b * WARM[2] * vig + grain;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// --- Retro date stamp (bottom-right) + hashtag (bottom-left) ---
+function stampRetro(w, h) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = `'${String(now.getFullYear()).slice(2)} ${pad(now.getMonth() + 1)} ${pad(now.getDate())}   ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const fontSize = Math.max(20, Math.round(Math.min(w, h) * 0.04));
+  const tagSize = Math.round(fontSize * 0.85);
+  const margin = Math.round(fontSize * 0.9);
+  const font = size => `700 ${size}px 'Space Mono', monospace`;
+
+  ctx.textBaseline = 'bottom';
+  ctx.font = font(fontSize);
+  const stampW = ctx.measureText(stamp).width;
+  ctx.font = font(tagSize);
+  const tagW = ctx.measureText(HASHTAG).width;
+  const sideBySide = stampW + tagW + margin * 3 <= w;
+
+  function draw(text, x, y, align, size) {
+    ctx.font = font(size);
+    ctx.textAlign = align;
+    ctx.shadowColor = 'rgba(255,110,20,0.85)';
+    ctx.shadowBlur = size * 0.4;
+    ctx.fillStyle = '#ff9a1f';
+    ctx.fillText(text, x, y);
+  }
+
+  draw(stamp, w - margin, h - margin, 'right', fontSize);
+  if (sideBySide) {
+    draw(HASHTAG, margin, h - margin, 'left', tagSize);
+  } else {
+    draw(HASHTAG, w - margin, h - margin - fontSize * 1.3, 'right', tagSize);
+  }
+  ctx.shadowBlur = 0;
+}
+
+// --- Capture: flash, retro look, stamps, then auto-upload ---
+
+async function snapPhoto() {
   if (busy) return;
   const w = video.videoWidth, h = video.videoHeight;
   if (!w || !h) return;
   busy = true;
+
+  // Front camera has no real flash, so light the guest up with a white screen
+  let screenFlash = null;
+  if (facingMode === 'user') screenFlash = await showScreenFlash();
 
   flashOverlay.classList.add('flash');
   setTimeout(() => flashOverlay.classList.remove('flash'), 350);
 
   canvas.width = w;
   canvas.height = h;
-  ctx.filter = BUILT_IN_FILTER.css;
   if (facingMode === 'user') {
     ctx.save();
     ctx.translate(w, 0);
@@ -213,28 +361,14 @@ function snapPhoto() {
   } else {
     ctx.drawImage(video, 0, 0, w, h);
   }
-  ctx.filter = 'none';
-  stampTimestamp(w, h);
+  if (screenFlash) screenFlash.remove();
+
+  applyRetroLook(w, h);
+  stampRetro(w, h);
 
   stopStream();
   viewfinder.style.display = 'none';
   uploadPhoto();
-}
-
-function stampTimestamp(w, h) {
-  const text = new Date().toLocaleString('en-US', {
-    month: '2-digit', day: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit'
-  }).replace(',', '');
-  const fontSize = Math.max(18, Math.round(w * 0.032));
-  ctx.font = `700 ${fontSize}px 'Space Mono', monospace`;
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'bottom';
-  const pad = fontSize * 0.9;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillText(text, w - pad + 1.5, h - pad + 1.5);
-  ctx.fillStyle = '#f4a33c';
-  ctx.fillText(text, w - pad, h - pad);
 }
 
 async function uploadPhoto() {
