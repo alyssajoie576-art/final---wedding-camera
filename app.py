@@ -24,7 +24,7 @@ WEDDING = {
     "partner_2": "Aly",
     "date": "November 29, 2026",
     "venue": "The Veranda Tagaytay",
-    "hashtag": "#GabfoundhisfinAly",
+    "hashtag": "#GABfoundhisfinALY",
     "welcome_message": "Help us capture today from every angle — tap the camera to snap a photo. It'll land straight in our shared album!",
     # Drop a photo of the two of you at static/couple.jpg (square-ish photos work best).
     "couple_photo": "couple.jpg",
@@ -38,8 +38,10 @@ GALLERY_PASSCODE = os.environ.get("GALLERY_PASSCODE", "ourwedding2026")
 
 # The one built-in look every photo gets automatically. Guests can't change this.
 BUILT_IN_FILTER = {
-    "label": "Vintage",
-    "css": "sepia(0.35) contrast(1.1) brightness(0.95) saturate(1.3)",
+    "label": "Dramatic Warm",
+    # Only used for the live preview. The real retro look is applied to the photo
+    # itself in templates/index.html (see LOOK and WARM there).
+    "css": "sepia(0.25) brightness(0.85) contrast(0.8) saturate(1.4) hue-rotate(-8deg)",
 }
 
 # ─────────────────────────────────────────────────────────────
